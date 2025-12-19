@@ -214,18 +214,21 @@ Error_Handler();
 
     if (pos != rx_last_pos)
     {
-      if (pos > rx_last_pos)
-      {
-        uart1_tx_dma(&rx_dma_buf[rx_last_pos], (uint16_t)(pos - rx_last_pos));
-      }
-      else
-      {
-        uart1_tx_dma(&rx_dma_buf[rx_last_pos], (uint16_t)(RX_BUF_SIZE - rx_last_pos));
-        if (pos > 0)
-          uart1_tx_dma(&rx_dma_buf[0], pos);
-      }
-      rx_last_pos = pos;
+        if (pos > rx_last_pos)
+        {
+            for (uint16_t i = rx_last_pos; i < pos; i++)
+                putchar(rx_dma_buf[i]);   // goes to VCP because printf does
+        }
+        else
+        {
+            for (uint16_t i = rx_last_pos; i < RX_BUF_SIZE; i++)
+                putchar(rx_dma_buf[i]);
+            for (uint16_t i = 0; i < pos; i++)
+                putchar(rx_dma_buf[i]);
+        }
+        rx_last_pos = pos;
     }
+
 
     /* USER CODE END WHILE */
 
