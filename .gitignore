@@ -1,0 +1,67 @@
+#########################
+# STM32CubeIDE / Eclipse
+#########################
+
+# Workspace / metadata (若專案根目錄即 repo root，通常不會有，但保險加)
+.metadata/
+RemoteSystemsTempFiles/
+
+# IDE 個人設定
+.settings/
+*.launch
+
+# 建置輸出
+Debug/
+Release/
+build/
+*.o
+*.d
+*.elf
+*.map
+*.hex
+*.bin
+*.list
+
+# 自動產生的其他中介檔
+*.log
+*.tmp
+
+#########################
+# 通用 C / C++ 專案
+#########################
+
+# 編譯輸出
+*.obj
+*.exe
+*.out
+*.a
+*.lib
+
+# 編譯器產生的雜項
+*.suo
+*.user
+*.pch
+
+# 其他 IDE 支援（避免把 VSCode 等本機設定推上去）
+.vscode/
+.idea/
+*.code-workspace
+
+#########################
+# OS / 編輯器
+#########################
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 編輯器暫存
+*~
+*.swp
+*.swo
