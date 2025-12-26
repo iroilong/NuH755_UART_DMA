@@ -62,9 +62,17 @@ DMA_HandleTypeDef hdma_usart1_rx;
 DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
-#define RX_BUF_SIZE 256
-static uint8_t rx_dma_buf[RX_BUF_SIZE];
-static uint16_t rx_last_pos = 0;
+#define RX_DMA_BUF_SIZE   256
+static uint8_t  rx_dma_buf[RX_DMA_BUF_SIZE];
+static uint16_t rx_dma_last_pos = 0;
+
+/* Software ring buffer */
+#define RX_RING_SIZE      1024
+static uint8_t  rx_ring[RX_RING_SIZE];
+static volatile uint16_t rx_ring_head = 0;   /* write index */
+static volatile uint16_t rx_ring_tail = 0;   /* read index */
+static volatile uint32_t rx_ring_overflow = 0;
+
 
 /* USER CODE END PV */
 
@@ -89,6 +97,59 @@ static void uart1_tx_dma(const uint8_t *data, uint16_t len)
 static void uart1_tx_str(const char *s)
 {
   uart1_tx_dma((const uint8_t*)s, (uint16_t)strlen(s));
+}
+
+static inline uint16_t rb_next(uint16_t x, uint16_t size)
+{
+  x++;
+  return (x >= size) ? 0 : x;
+}
+
+static void rb_push(uint8_t b)
+{
+  uint16_t next = rb_next(rx_ring_head, RX_RING_SIZE);
+
+  /* ring full -> drop byte */
+  if (next == rx_ring_tail) {
+    rx_ring_overflow++;
+    return;
+  }
+
+  rx_ring[rx_ring_head] = b;
+  rx_ring_head = next;
+}
+
+static int rb_pop(uint8_t *out)
+{
+  if (rx_ring_tail == rx_ring_head) return 0;  /* empty */
+
+  *out = rx_ring[rx_ring_tail];
+  rx_ring_tail = rb_next(rx_ring_tail, RX_RING_SIZE);
+  return 1;
+}
+
+/* Move newly received DMA bytes into ring */
+static void uart1_rx_dma_to_ring(void)
+{
+  uint16_t pos = (uint16_t)(RX_DMA_BUF_SIZE - __HAL_DMA_GET_COUNTER(huart1.hdmarx));
+
+  if (pos == rx_dma_last_pos) return;
+
+  if (pos > rx_dma_last_pos) {
+    for (uint16_t i = rx_dma_last_pos; i < pos; i++) {
+      rb_push(rx_dma_buf[i]);
+    }
+  } else {
+    /* wrapped */
+    for (uint16_t i = rx_dma_last_pos; i < RX_DMA_BUF_SIZE; i++) {
+      rb_push(rx_dma_buf[i]);
+    }
+    for (uint16_t i = 0; i < pos; i++) {
+      rb_push(rx_dma_buf[i]);
+    }
+  }
+
+  rx_dma_last_pos = pos;
 }
 
 /* USER CODE END 0 */
@@ -160,8 +221,9 @@ Error_Handler();
   MX_DMA_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_UART_Receive_DMA(&huart1, rx_dma_buf, RX_BUF_SIZE);
-  uart1_tx_str("\r\nUART1 RX DMA (circular) ready. Type something...\r\n");
+  HAL_UART_Receive_DMA(&huart1, rx_dma_buf, RX_DMA_BUF_SIZE);
+  uart1_tx_str("\r\nUART1 RX DMA(circular) + SW ring(1024) ready.\r\n");
+
 
   /* USER CODE END 2 */
 
@@ -210,24 +272,17 @@ Error_Handler();
       /* ..... Perform your action ..... */
     }
 
-    uint16_t pos = (uint16_t)(RX_BUF_SIZE - __HAL_DMA_GET_COUNTER(huart1.hdmarx));
+    /* 1) Pull new bytes from DMA buffer into software ring */
+    uart1_rx_dma_to_ring();
 
-    if (pos != rx_last_pos)
-    {
-        if (pos > rx_last_pos)
-        {
-            for (uint16_t i = rx_last_pos; i < pos; i++)
-                putchar(rx_dma_buf[i]);   // goes to VCP because printf does
-        }
-        else
-        {
-            for (uint16_t i = rx_last_pos; i < RX_BUF_SIZE; i++)
-                putchar(rx_dma_buf[i]);
-            for (uint16_t i = 0; i < pos; i++)
-                putchar(rx_dma_buf[i]);
-        }
-        rx_last_pos = pos;
+    /* 2) Consume ring: echo to VCP */
+    uint8_t ch;
+    while (rb_pop(&ch)) {
+      putchar(ch);
     }
+
+    /* (optional) 看 overflow 次數，方便驗證有沒有再丟資料 */
+     if (rx_ring_overflow) { printf("\r\n[OVF=%lu]\r\n", rx_ring_overflow); rx_ring_overflow = 0; }
 
 
     /* USER CODE END WHILE */
