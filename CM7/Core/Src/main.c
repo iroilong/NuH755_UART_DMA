@@ -1,20 +1,20 @@
 /* USER CODE BEGIN Header */
 /**
- ******************************************************************************
- * @file           : main.c
- * @brief          : Main program body
- ******************************************************************************
- * @attention
- *
- * Copyright (c) 2025 STMicroelectronics.
- * All rights reserved.
- *
- * This software is licensed under terms that can be found in the LICENSE file
- * in the root directory of this software component.
- * If no LICENSE file comes with this software, it is provided AS-IS.
- *
- ******************************************************************************
- */
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2025 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -38,6 +38,7 @@
 /* This define is present in both CM7/CM4 projects                            */
 /* To comment when developping/debugging on a single core                     */
 //#define DUAL_CORE_BOOT_SYNC_SEQUENCE
+
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
 #ifndef HSEM_ID_0
 #define HSEM_ID_0 (0U) /* HW semaphore 0*/
@@ -61,18 +62,20 @@ DMA_HandleTypeDef hdma_usart1_rx;
 DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
-#define RX_DMA_BUF_SIZE   256
-static uint8_t rx_dma_buf[RX_DMA_BUF_SIZE];
-static uint16_t rx_dma_last_pos = 0;
-#define VCP_CHUNK_SIZE        64
-#define VCP_TX_MIN_INTERVAL  1   // ms
+#define RX_BUF_SIZE 256
+static uint8_t rx_dma_buf[RX_BUF_SIZE];
+static uint16_t rx_last_pos = 0;
 
-/* Software ring buffer */
-#define RX_RING_SIZE      1024
-static uint8_t rx_ring[RX_RING_SIZE];
-static volatile uint16_t rx_ring_head = 0; /* write index */
-static volatile uint16_t rx_ring_tail = 0; /* read index */
-static volatile uint32_t rx_ring_overflow = 0;
+#define RX_RINGBUF_SIZE 1024
+static uint8_t rx_ring_buf[RX_RINGBUF_SIZE];
+static uint16_t rx_rb_head = 0;
+static uint16_t rx_rb_tail = 0;
+static uint16_t next_head = 0;
+
+
+#define RX_RINGBUF_CHUNK_SIZE 32
+static uint8_t rx_ring_buf_chunk[RX_RINGBUF_CHUNK_SIZE];
+static uint16_t chunk_valid = 0;
 
 /* USER CODE END PV */
 
@@ -82,108 +85,91 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void RingBuf_WR(uint8_t data);
+static void RingBuf_RD(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#include "stm32h7xx_nucleo.h"   // 確保 BSP symbols 可見
-
-extern UART_HandleTypeDef hcom_uart[];
-
-
-static void uart1_tx_dma(const uint8_t *data, uint16_t len) {
-	/* Demo-grade: wait until previous TX DMA finished */
-	while (huart1.gState != HAL_UART_STATE_READY) {
-	}
-	HAL_UART_Transmit_DMA(&huart1, (uint8_t*) data, len);
-}
-
-static void uart1_tx_str(const char *s) {
-	uart1_tx_dma((const uint8_t*) s, (uint16_t) strlen(s));
-}
-
-static inline uint16_t rb_next(uint16_t x, uint16_t size) {
-	x++;
-	return (x >= size) ? 0 : x;
-}
-
-static void rb_push(uint8_t b) {
-	uint16_t next = rb_next(rx_ring_head, RX_RING_SIZE);
-
-	/* ring full -> drop byte */
-	if (next == rx_ring_tail) {
-		rx_ring_overflow++;
-		return;
-	}
-
-	rx_ring[rx_ring_head] = b;
-	rx_ring_head = next;
-}
-
-static int rb_pop(uint8_t *out) {
-	if (rx_ring_tail == rx_ring_head)
-		return 0; /* empty */
-
-	*out = rx_ring[rx_ring_tail];
-	rx_ring_tail = rb_next(rx_ring_tail, RX_RING_SIZE);
-	return 1;
-}
-
-extern UART_HandleTypeDef hcom_uart[];      // BSP COM UART array
-
-static void vcp_tx_block(const uint8_t *buf, uint16_t len)
+static void uart1_tx_dma(const uint8_t *data, uint16_t len)
 {
-    HAL_UART_Transmit(&hcom_uart[COM1],
-                      (uint8_t*)buf,
-                      len,
-                      COM_POLL_TIMEOUT);
+  /* Demo-grade: wait until previous TX DMA finished */
+  while (huart1.gState != HAL_UART_STATE_READY) { }
+  HAL_UART_Transmit_DMA(&huart1, (uint8_t*)data, len);
 }
 
+static void uart1_tx_str(const char *s)
+{
+  uart1_tx_dma((const uint8_t*)s, (uint16_t)strlen(s));
+}
 
-/* Move newly received DMA bytes into ring */
-static void uart1_rx_dma_to_ring(void) {
-	uint16_t pos = (uint16_t) (RX_DMA_BUF_SIZE
-			- __HAL_DMA_GET_COUNTER(huart1.hdmarx));
+static void RingBuf_WR(uint8_t data)
+{
+	static uint32_t of_cnt = 0;
+	next_head = (rx_rb_head + 1) % RX_RINGBUF_SIZE;
 
-	if (pos == rx_dma_last_pos)
+	if (next_head == rx_rb_tail)
+	{
+		printf("%04d Ring Buffer Overflow!!!!!!!!!!!\r\n", of_cnt++);
+		return;
+	}
+
+	rx_ring_buf[rx_rb_head] = data;
+	rx_rb_head = next_head;
+}
+
+static void RingBuf_RD(void)
+{
+	chunk_valid = 0;
+
+	if (rx_rb_head == rx_rb_tail)
 		return;
 
-	if (pos > rx_dma_last_pos) {
-		for (uint16_t i = rx_dma_last_pos; i < pos; i++) {
-			rb_push(rx_dma_buf[i]);
+	if (rx_rb_head > rx_rb_tail)
+	{
+		if (rx_rb_head -rx_rb_tail >= RX_RINGBUF_CHUNK_SIZE)
+		{
+			for (uint16_t i = rx_rb_tail; i < RX_RINGBUF_CHUNK_SIZE; i++)
+			{
+				rx_ring_buf_chunk[i - rx_rb_tail] = rx_ring_buf[i];
+				chunk_valid++;
+			}
+			rx_rb_tail = rx_rb_tail + chunk_valid;
 		}
-	} else {
-		/* wrapped */
-		for (uint16_t i = rx_dma_last_pos; i < RX_DMA_BUF_SIZE; i++) {
-			rb_push(rx_dma_buf[i]);
-		}
-		for (uint16_t i = 0; i < pos; i++) {
-			rb_push(rx_dma_buf[i]);
+		else
+		{
+			for (uint16_t i = rx_rb_tail; i < rx_rb_head; i++)
+			{
+				rx_ring_buf_chunk[i - rx_rb_tail] = rx_ring_buf[i];
+				chunk_valid++;
+			}
+			rx_rb_tail = rx_rb_tail + chunk_valid;
 		}
 	}
 
-	rx_dma_last_pos = pos;
+	HAL_UART_Transmit(&huart1, rx_ring_buf_chunk, chunk_valid, 1000);  // timeout 1s
+
 }
 
 /* USER CODE END 0 */
 
 /**
- * @brief  The application entry point.
- * @retval int
- */
-int main(void) {
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
 
-	/* USER CODE BEGIN 1 */
+  /* USER CODE BEGIN 1 */
 
-	/* USER CODE END 1 */
-	/* USER CODE BEGIN Boot_Mode_Sequence_0 */
+  /* USER CODE END 1 */
+/* USER CODE BEGIN Boot_Mode_Sequence_0 */
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
   int32_t timeout;
 #endif /* DUAL_CORE_BOOT_SYNC_SEQUENCE */
-	/* USER CODE END Boot_Mode_Sequence_0 */
+/* USER CODE END Boot_Mode_Sequence_0 */
 
-	/* USER CODE BEGIN Boot_Mode_Sequence_1 */
+/* USER CODE BEGIN Boot_Mode_Sequence_1 */
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
   /* Wait until CPU2 boots and enters in stop mode or timeout*/
   timeout = 0xFFFF;
@@ -193,19 +179,19 @@ int main(void) {
   Error_Handler();
   }
 #endif /* DUAL_CORE_BOOT_SYNC_SEQUENCE */
-	/* USER CODE END Boot_Mode_Sequence_1 */
-	/* MCU Configuration--------------------------------------------------------*/
+/* USER CODE END Boot_Mode_Sequence_1 */
+  /* MCU Configuration--------------------------------------------------------*/
 
-	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-	HAL_Init();
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
 
-	/* USER CODE BEGIN Init */
+  /* USER CODE BEGIN Init */
 
-	/* USER CODE END Init */
+  /* USER CODE END Init */
 
-	/* Configure the system clock */
-	SystemClock_Config();
-	/* USER CODE BEGIN Boot_Mode_Sequence_2 */
+  /* Configure the system clock */
+  SystemClock_Config();
+/* USER CODE BEGIN Boot_Mode_Sequence_2 */
 #if defined(DUAL_CORE_BOOT_SYNC_SEQUENCE)
 /* When system initialization is finished, Cortex-M7 will release Cortex-M4 by means of
 HSEM notification */
@@ -223,280 +209,293 @@ if ( timeout < 0 )
 Error_Handler();
 }
 #endif /* DUAL_CORE_BOOT_SYNC_SEQUENCE */
-	/* USER CODE END Boot_Mode_Sequence_2 */
+/* USER CODE END Boot_Mode_Sequence_2 */
 
-	/* USER CODE BEGIN SysInit */
+  /* USER CODE BEGIN SysInit */
 
-	/* USER CODE END SysInit */
+  /* USER CODE END SysInit */
 
-	/* Initialize all configured peripherals */
-	MX_GPIO_Init();
-	MX_DMA_Init();
-	MX_USART1_UART_Init();
-	/* USER CODE BEGIN 2 */
-	HAL_UART_Receive_DMA(&huart1, rx_dma_buf, RX_DMA_BUF_SIZE);
-	uart1_tx_str("\r\nUART1 RX DMA(circular) + SW ring(1024) ready.\r\n");
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_DMA_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE BEGIN 2 */
+  HAL_UART_Receive_DMA(&huart1, rx_dma_buf, RX_BUF_SIZE);
+  uart1_tx_str("\r\nUART1 RX DMA (circular) ready. Type something...\r\n");
 
-	/* USER CODE END 2 */
+  /* USER CODE END 2 */
 
-	/* Initialize leds */
-	BSP_LED_Init(LED_GREEN);
-	BSP_LED_Init(LED_YELLOW);
-	BSP_LED_Init(LED_RED);
+  /* Initialize leds */
+  BSP_LED_Init(LED_GREEN);
+  BSP_LED_Init(LED_YELLOW);
+  BSP_LED_Init(LED_RED);
 
-	/* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
-	BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
+  /* Initialize USER push-button, will be used to trigger an interrupt each time it's pressed.*/
+  BSP_PB_Init(BUTTON_USER, BUTTON_MODE_EXTI);
 
-	/* Initialize COM1 port (115200, 8 bits (7-bit data + 1 stop bit), no parity */
-	BspCOMInit.BaudRate = 115200;
-	BspCOMInit.WordLength = COM_WORDLENGTH_8B;
-	BspCOMInit.StopBits = COM_STOPBITS_1;
-	BspCOMInit.Parity = COM_PARITY_NONE;
-	BspCOMInit.HwFlowCtl = COM_HWCONTROL_NONE;
-	if (BSP_COM_Init(COM1, &BspCOMInit) != BSP_ERROR_NONE) {
-		Error_Handler();
-	}
+  /* Initialize COM1 port (115200, 8 bits (7-bit data + 1 stop bit), no parity */
+  BspCOMInit.BaudRate   = 115200;
+  BspCOMInit.WordLength = COM_WORDLENGTH_8B;
+  BspCOMInit.StopBits   = COM_STOPBITS_1;
+  BspCOMInit.Parity     = COM_PARITY_NONE;
+  BspCOMInit.HwFlowCtl  = COM_HWCONTROL_NONE;
+  if (BSP_COM_Init(COM1, &BspCOMInit) != BSP_ERROR_NONE)
+  {
+    Error_Handler();
+  }
 
-	/* USER CODE BEGIN BSP */
-	/* -- Sample board code to send message over COM1 port ---- */
-	printf("Welcome to STM32 world !\n\r");
-	/* -- Sample board code to switch on leds ---- */
-	BSP_LED_On(LED_GREEN);
-	BSP_LED_On(LED_YELLOW);
-	BSP_LED_On(LED_RED);
-	/* USER CODE END BSP */
+  /* USER CODE BEGIN BSP */
+  /* -- Sample board code to send message over COM1 port ---- */
+  printf("Welcome to STM32 world !\n\r");
+  /* -- Sample board code to switch on leds ---- */
+  BSP_LED_On(LED_GREEN);
+  BSP_LED_On(LED_YELLOW);
+  BSP_LED_On(LED_RED);
+  /* USER CODE END BSP */
 
-	/* Infinite loop */
-	/* USER CODE BEGIN WHILE */
-	while (1) {
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
 
-		/* -- Sample board code for User push-button in interrupt mode ---- */
-		if (BspButtonState == BUTTON_PRESSED) {
-			/* Update button state */
-			BspButtonState = BUTTON_RELEASED;
-			/* -- Sample board code to toggle leds ---- */
-			BSP_LED_Toggle(LED_GREEN);
-			BSP_LED_Toggle(LED_YELLOW);
-			BSP_LED_Toggle(LED_RED);
-			/* ..... Perform your action ..... */
-		}
+    /* -- Sample board code for User push-button in interrupt mode ---- */
+    if (BspButtonState == BUTTON_PRESSED)
+    {
+      /* Update button state */
+      BspButtonState = BUTTON_RELEASED;
+      /* -- Sample board code to toggle leds ---- */
+      BSP_LED_Toggle(LED_GREEN);
+      BSP_LED_Toggle(LED_YELLOW);
+      BSP_LED_Toggle(LED_RED);
+      /* ..... Perform your action ..... */
+    }
 
-		/* 1) Pull new bytes from DMA buffer into software ring */
-		uart1_rx_dma_to_ring();
+    /* Move DMA to Ring Buffer */
+    uint16_t pos = (uint16_t)(RX_BUF_SIZE - __HAL_DMA_GET_COUNTER(huart1.hdmarx));
 
-		/* 2) Consume ring: echo to VCP */
-		uint8_t out[VCP_CHUNK_SIZE];
-		uint16_t n = 0;
+    if (pos != rx_last_pos)
+    {
+        if (pos > rx_last_pos)
+        {
+            for (uint16_t i = rx_last_pos; i < pos; i++)
+            {
+            	RingBuf_WR(rx_dma_buf[i]);
+            }
+        }
+        else
+        {
+            for (uint16_t i = rx_last_pos; i < RX_BUF_SIZE; i++)
+            	RingBuf_WR(rx_dma_buf[i]);
+            for (uint16_t i = 0; i < pos; i++)
+            	RingBuf_WR(rx_dma_buf[i]);
+        }
+        rx_last_pos = pos;
+    }
 
-		/* 從 ring 取最多 VCP_CHUNK_SIZE bytes */
-		while (n < VCP_CHUNK_SIZE && rb_pop(&out[n])) {
-			n++;
-		}
+    RingBuf_RD();
 
-		/* 有資料就送，不用等滿 */
-		if (n) {
-			vcp_tx_block(out, n);
-		}
+    /* USER CODE END WHILE */
 
-		/* (optional) 看 overflow 次數，方便驗證有沒有再丟資料 */
-//     if (rx_ring_overflow) { printf("\r\n[OVF=%lu]\r\n", rx_ring_overflow); rx_ring_overflow = 0; }
-
-		/* USER CODE END WHILE */
-
-		/* USER CODE BEGIN 3 */
-	}
-	/* USER CODE END 3 */
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
-void SystemClock_Config(void) {
-	RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
-	RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-	/** Supply configuration update enable
-	 */
-	HAL_PWREx_ConfigSupply(PWR_DIRECT_SMPS_SUPPLY);
+  /** Supply configuration update enable
+  */
+  HAL_PWREx_ConfigSupply(PWR_DIRECT_SMPS_SUPPLY);
 
-	/** Configure the main internal regulator output voltage
-	 */
-	__HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-	while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
-	}
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-	/** Initializes the RCC Oscillators according to the specified parameters
-	 * in the RCC_OscInitTypeDef structure.
-	 */
-	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-	RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
-	RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
-	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
-		Error_Handler();
-	}
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-	/** Initializes the CPU, AHB and APB buses clocks
-	 */
-	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-			| RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_D3PCLK1
-			| RCC_CLOCKTYPE_D1PCLK1;
-	RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
-	RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-	RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-	RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
-	RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
-	RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
-	RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
 
-	if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK) {
-		Error_Handler();
-	}
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 /**
- * @brief USART1 Initialization Function
- * @param None
- * @retval None
- */
-static void MX_USART1_UART_Init(void) {
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
 
-	/* USER CODE BEGIN USART1_Init 0 */
+  /* USER CODE BEGIN USART1_Init 0 */
 
-	/* USER CODE END USART1_Init 0 */
+  /* USER CODE END USART1_Init 0 */
 
-	/* USER CODE BEGIN USART1_Init 1 */
+  /* USER CODE BEGIN USART1_Init 1 */
 
-	/* USER CODE END USART1_Init 1 */
-	huart1.Instance = USART1;
-	huart1.Init.BaudRate = 115200;
-	huart1.Init.WordLength = UART_WORDLENGTH_8B;
-	huart1.Init.StopBits = UART_STOPBITS_1;
-	huart1.Init.Parity = UART_PARITY_NONE;
-	huart1.Init.Mode = UART_MODE_TX_RX;
-	huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-	huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-	huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-	huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-	huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-	if (HAL_UART_Init(&huart1) != HAL_OK) {
-		Error_Handler();
-	}
-	if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8)
-			!= HAL_OK) {
-		Error_Handler();
-	}
-	if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8)
-			!= HAL_OK) {
-		Error_Handler();
-	}
-	if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK) {
-		Error_Handler();
-	}
-	/* USER CODE BEGIN USART1_Init 2 */
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
 
-	/* USER CODE END USART1_Init 2 */
-
-}
-
-/**
- * Enable DMA controller clock
- */
-static void MX_DMA_Init(void) {
-
-	/* DMA controller clock enable */
-	__HAL_RCC_DMA1_CLK_ENABLE();
-
-	/* DMA interrupt init */
-	/* DMA1_Stream0_IRQn interrupt configuration */
-	HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
-	HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
-	/* DMA1_Stream1_IRQn interrupt configuration */
-	HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
-	HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+  /* USER CODE END USART1_Init 2 */
 
 }
 
 /**
- * @brief GPIO Initialization Function
- * @param None
- * @retval None
- */
-static void MX_GPIO_Init(void) {
-	GPIO_InitTypeDef GPIO_InitStruct = { 0 };
-	/* USER CODE BEGIN MX_GPIO_Init_1 */
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
 
-	/* USER CODE END MX_GPIO_Init_1 */
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
-	/* GPIO Ports Clock Enable */
-	__HAL_RCC_GPIOC_CLK_ENABLE();
-	__HAL_RCC_GPIOA_CLK_ENABLE();
-	__HAL_RCC_GPIOB_CLK_ENABLE();
-	__HAL_RCC_GPIOD_CLK_ENABLE();
-	__HAL_RCC_GPIOG_CLK_ENABLE();
+  /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
-	/*Configure GPIO pin Output Level */
-	HAL_GPIO_WritePin(USB_OTG_FS_PWR_EN_GPIO_Port, USB_OTG_FS_PWR_EN_Pin,
-			GPIO_PIN_RESET);
+}
 
-	/*Configure GPIO pins : PC1 PC4 PC5 */
-	GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_4 | GPIO_PIN_5;
-	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-	GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
-	HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
 
-	/*Configure GPIO pins : PA1 PA2 PA7 */
-	GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_7;
-	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-	GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
-	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  /* USER CODE END MX_GPIO_Init_1 */
 
-	/*Configure GPIO pin : PB13 */
-	GPIO_InitStruct.Pin = GPIO_PIN_13;
-	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-	GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
-	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
 
-	/*Configure GPIO pin : USB_OTG_FS_PWR_EN_Pin */
-	GPIO_InitStruct.Pin = USB_OTG_FS_PWR_EN_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	HAL_GPIO_Init(USB_OTG_FS_PWR_EN_GPIO_Port, &GPIO_InitStruct);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(USB_OTG_FS_PWR_EN_GPIO_Port, USB_OTG_FS_PWR_EN_Pin, GPIO_PIN_RESET);
 
-	/*Configure GPIO pin : USB_OTG_FS_OVCR_Pin */
-	GPIO_InitStruct.Pin = USB_OTG_FS_OVCR_Pin;
-	GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	HAL_GPIO_Init(USB_OTG_FS_OVCR_GPIO_Port, &GPIO_InitStruct);
+  /*Configure GPIO pins : PC1 PC4 PC5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_4|GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-	/*Configure GPIO pins : PA8 PA11 PA12 */
-	GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_11 | GPIO_PIN_12;
-	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	GPIO_InitStruct.Alternate = GPIO_AF10_OTG1_FS;
-	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  /*Configure GPIO pins : PA1 PA2 PA7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-	/*Configure GPIO pins : PG11 PG13 */
-	GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_13;
-	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-	GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
-	HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+  /*Configure GPIO pin : PB13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-	/* USER CODE BEGIN MX_GPIO_Init_2 */
+  /*Configure GPIO pin : USB_OTG_FS_PWR_EN_Pin */
+  GPIO_InitStruct.Pin = USB_OTG_FS_PWR_EN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(USB_OTG_FS_PWR_EN_GPIO_Port, &GPIO_InitStruct);
 
-	/* USER CODE END MX_GPIO_Init_2 */
+  /*Configure GPIO pin : USB_OTG_FS_OVCR_Pin */
+  GPIO_InitStruct.Pin = USB_OTG_FS_OVCR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(USB_OTG_FS_OVCR_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PA8 PA11 PA12 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_11|GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF10_OTG1_FS;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PG11 PG13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF11_ETH;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
@@ -504,27 +503,31 @@ static void MX_GPIO_Init(void) {
 /* USER CODE END 4 */
 
 /**
- * @brief  BSP Push Button callback
- * @param  Button Specifies the pressed button
- * @retval None
- */
-void BSP_PB_Callback(Button_TypeDef Button) {
-	if (Button == BUTTON_USER) {
-		BspButtonState = BUTTON_PRESSED;
-	}
+  * @brief  BSP Push Button callback
+  * @param  Button Specifies the pressed button
+  * @retval None
+  */
+void BSP_PB_Callback(Button_TypeDef Button)
+{
+  if (Button == BUTTON_USER)
+  {
+    BspButtonState = BUTTON_PRESSED;
+  }
 }
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
-void Error_Handler(void) {
-	/* USER CODE BEGIN Error_Handler_Debug */
-	/* User can add his own implementation to report the HAL error return state */
-	__disable_irq();
-	while (1) {
-	}
-	/* USER CODE END Error_Handler_Debug */
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**
