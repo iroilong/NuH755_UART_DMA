@@ -73,9 +73,10 @@ static uint16_t rx_rb_tail = 0;
 static uint16_t next_head = 0;
 
 
-#define RX_RINGBUF_CHUNK_SIZE 32
+#define RX_RINGBUF_CHUNK_SIZE 64
 static uint8_t rx_ring_buf_chunk[RX_RINGBUF_CHUNK_SIZE];
-static uint16_t chunk_valid = 0;
+static uint16_t available  = 0;
+static uint16_t to_read  = 0;
 
 /* USER CODE END PV */
 
@@ -105,7 +106,7 @@ static void uart1_tx_str(const char *s)
 
 static void RingBuf_WR(uint8_t data)
 {
-	static uint32_t of_cnt = 0;
+	static int of_cnt = 0;
 	next_head = (rx_rb_head + 1) % RX_RINGBUF_SIZE;
 
 	if (next_head == rx_rb_tail)
@@ -120,34 +121,21 @@ static void RingBuf_WR(uint8_t data)
 
 static void RingBuf_RD(void)
 {
-	chunk_valid = 0;
+	available = (rx_rb_head >= rx_rb_tail) ? (rx_rb_head - rx_rb_tail) : (RX_RINGBUF_SIZE - rx_rb_tail + rx_rb_head);
 
-	if (rx_rb_head == rx_rb_tail)
+	if (available == 0)
 		return;
 
-	if (rx_rb_head > rx_rb_tail)
+	to_read = (available >= RX_RINGBUF_CHUNK_SIZE) ? RX_RINGBUF_CHUNK_SIZE : available;
+
+	for (uint16_t i = 0; i < to_read; i++)
 	{
-		if (rx_rb_head -rx_rb_tail >= RX_RINGBUF_CHUNK_SIZE)
-		{
-			for (uint16_t i = rx_rb_tail; i < RX_RINGBUF_CHUNK_SIZE; i++)
-			{
-				rx_ring_buf_chunk[i - rx_rb_tail] = rx_ring_buf[i];
-				chunk_valid++;
-			}
-			rx_rb_tail = rx_rb_tail + chunk_valid;
-		}
-		else
-		{
-			for (uint16_t i = rx_rb_tail; i < rx_rb_head; i++)
-			{
-				rx_ring_buf_chunk[i - rx_rb_tail] = rx_ring_buf[i];
-				chunk_valid++;
-			}
-			rx_rb_tail = rx_rb_tail + chunk_valid;
-		}
+		rx_ring_buf_chunk[i] = rx_ring_buf[(rx_rb_tail + i) % RX_RINGBUF_SIZE];
 	}
 
-	HAL_UART_Transmit(&huart1, rx_ring_buf_chunk, chunk_valid, 1000);  // timeout 1s
+	rx_rb_tail = (rx_rb_tail + to_read) % RX_RINGBUF_SIZE;
+
+	HAL_UART_Transmit(&hcom_uart[COM1], rx_ring_buf_chunk, to_read, 1000);  // timeout 1s
 
 }
 
